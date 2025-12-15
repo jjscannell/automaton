@@ -1,0 +1,298 @@
+{
+  "name": "06 - Code Review Learning & Enforcement System (Medium-High)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "github-pr-webhook",
+        "options": {}
+      },
+      "name": "GitHub PR Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 400],
+      "webhookId": "github-pr",
+      "id": "webhook-trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract PR data from GitHub webhook\nconst pr = $input.item.json.pull_request || {};\nconst action = $input.item.json.action;\n\n// Only process opened/synchronize (new commits) PRs\nif (!['opened', 'synchronize'].includes(action)) {\n  return [];\n}\n\nconst prData = {\n  number: pr.number,\n  title: pr.title || 'Untitled',\n  author: pr.user?.login || 'unknown',\n  branch: pr.head?.ref || 'unknown',\n  baseBranch: pr.base?.ref || 'main',\n  url: pr.html_url,\n  diffUrl: pr.diff_url,\n  additions: pr.additions || 0,\n  deletions: pr.deletions || 0,\n  changedFiles: pr.changed_files || 0,\n  reviewId: `review-${pr.number}-${Date.now()}`\n};\n\nreturn [{ json: prData }];"
+      },
+      "name": "Parse PR Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 400],
+      "id": "parse-pr"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Load learned review patterns from static data\nif (!$workflow.staticData.reviewPatterns) {\n  $workflow.staticData.reviewPatterns = {\n    antiPatterns: [],\n    goodPatterns: [],\n    projectRules: [],\n    lastUpdated: new Date().toISOString()\n  };\n}\n\nconst patterns = $workflow.staticData.reviewPatterns;\n\nreturn [{\n  json: {\n    ...$input.item.json,\n    learnedPatterns: patterns,\n    patternCount: patterns.antiPatterns.length + patterns.goodPatterns.length\n  }\n}];"
+      },
+      "name": "Load Learned Patterns",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 400],
+      "id": "load-patterns"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Analyze this PR for code quality issues. Focus on: security vulnerabilities, performance issues, code smells, missing tests, poor naming.\\n\\nPR: {{ $json.title }}\\nAuthor: {{ $json.author }}\\nFiles changed: {{ $json.changedFiles }}\\nAdditions: {{ $json.additions }}\\nDeletions: {{ $json.deletions }}\\n\\nProvide a concise review with specific line numbers if possible.\" --session-id {{ $json.reviewId }}"
+      },
+      "name": "Analyzer Agent - Extract Patterns",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [850, 400],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "id": "analyze"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Based on our learned patterns, review this code.\\n\\nKnown anti-patterns to check: {{ $json.learnedPatterns.antiPatterns.slice(0, 5).join(', ') || 'None yet' }}\\n\\nGood patterns to encourage: {{ $json.learnedPatterns.goodPatterns.slice(0, 5).join(', ') || 'None yet' }}\\n\\nPR: {{ $json.title }}\\nAnalysis: {{ $json.stdout || $json.output }}\\n\\nProvide actionable feedback.\" --session-id {{ $json.reviewId }}"
+      },
+      "name": "Review Agent - Apply Rules",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1050, 400],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "id": "review"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Store review for learning\nconst review = {\n  prNumber: $input.item.json.number,\n  reviewId: $input.item.json.reviewId,\n  author: $input.item.json.author,\n  analysis: $input.item.json.stdout || $input.item.json.output,\n  timestamp: new Date().toISOString(),\n  humanFeedback: null, // Will be updated when human responds\n  accepted: null\n};\n\n// Store in review history\nif (!$workflow.staticData.reviewHistory) {\n  $workflow.staticData.reviewHistory = [];\n}\n$workflow.staticData.reviewHistory.push(review);\n\n// Keep last 50 reviews\nif ($workflow.staticData.reviewHistory.length > 50) {\n  $workflow.staticData.reviewHistory = $workflow.staticData.reviewHistory.slice(-50);\n}\n\nreturn [{ json: { ...($input.item.json), review } }];"
+      },
+      "name": "Store Review in Database",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 400],
+      "id": "store-review"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format review comment for GitHub\nconst comment = `## 🤖 Automated Code Review\\n\\n${$input.item.json.review.analysis}\\n\\n---\\n*Review ID: ${$input.item.json.reviewId}*\\n*This review uses learned patterns from ${$input.item.json.patternCount} previous reviews*\\n\\n👍 React with 👍 if helpful, 👎 if not helpful (helps me learn!)`;\n\nreturn [{\n  json: {\n    ...$input.item.json,\n    commentBody: comment\n  }\n}];"
+      },
+      "name": "Format GitHub Comment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 400],
+      "id": "format-comment"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Simulate posting to GitHub (would use HTTP Request in production)\nconst result = {\n  status: 'comment-posted',\n  prNumber: $input.item.json.number,\n  reviewId: $input.item.json.reviewId,\n  comment: $input.item.json.commentBody,\n  timestamp: new Date().toISOString()\n};\n\nconsole.log('Review posted to PR #' + result.prNumber);\nreturn [{ json: result }];"
+      },
+      "name": "Post to GitHub PR",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 400],
+      "id": "post-comment"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1
+            }
+          ]
+        }
+      },
+      "name": "Weekly Learning Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 700],
+      "id": "learning-trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Analyze review history to identify patterns\nconst history = $workflow.staticData.reviewHistory || [];\n\nif (history.length < 5) {\n  return [{ json: { message: 'Not enough reviews yet for learning', count: history.length } }];\n}\n\n// Prepare data for learning agent\nconst recentReviews = history.slice(-20);\nconst acceptedReviews = recentReviews.filter(r => r.accepted === true);\nconst rejectedReviews = recentReviews.filter(r => r.accepted === false);\n\nreturn [{\n  json: {\n    totalReviews: history.length,\n    recentReviews: recentReviews.length,\n    acceptedCount: acceptedReviews.length,\n    rejectedCount: rejectedReviews.length,\n    acceptanceRate: (acceptedReviews.length / recentReviews.length * 100).toFixed(1),\n    reviewSummaries: recentReviews.map(r => ({\n      analysis: r.analysis.substring(0, 200),\n      accepted: r.accepted\n    }))\n  }\n}];"
+      },
+      "name": "Analyze Review History",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 700],
+      "id": "analyze-history"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Analyze these code review outcomes and identify patterns.\\n\\nTotal reviews: {{ $json.totalReviews }}\\nAcceptance rate: {{ $json.acceptanceRate }}%\\n\\nIdentify:\\n1. What issues are commonly accepted by developers\\n2. What feedback is commonly rejected\\n3. New patterns we should check for\\n4. Patterns we should stop checking\\n\\nProvide 3-5 actionable insights.\" --session-id learning-{{ Date.now() }}"
+      },
+      "name": "Learning Agent - Identify Patterns",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [650, 700],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "learning-agent"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Update learned patterns based on agent insights\nconst insights = $input.item.json.stdout || $input.item.json.output || '';\n\n// In production, would parse insights and update patterns\n// For now, log the insights\n$workflow.staticData.reviewPatterns.lastUpdated = new Date().toISOString();\n$workflow.staticData.reviewPatterns.lastInsights = insights;\n\nconst report = {\n  status: 'patterns-updated',\n  timestamp: new Date().toISOString(),\n  insights: insights,\n  totalReviews: $input.item.json.totalReviews,\n  acceptanceRate: $input.item.json.acceptanceRate\n};\n\nconsole.log('Learning update:', report);\nreturn [{ json: report }];"
+      },
+      "name": "Update Patterns",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 700],
+      "id": "update-patterns"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate monthly trend report\nconst report = {\n  status: 'trend-report',\n  period: 'monthly',\n  timestamp: new Date().toISOString(),\n  summary: $input.item.json.insights,\n  metrics: {\n    totalReviews: $input.item.json.totalReviews,\n    acceptanceRate: $input.item.json.acceptanceRate\n  },\n  reportText: `# Monthly Code Review Report\\n\\n## Metrics\\n- Total Reviews: ${$input.item.json.totalReviews}\\n- Acceptance Rate: ${$input.item.json.acceptanceRate}%\\n\\n## Insights\\n${$input.item.json.insights}\\n\\n## Recommendations\\n- Continue monitoring these patterns\\n- Update review guidelines based on insights`\n};\n\nconsole.log('Monthly report generated');\nreturn [{ json: report }];"
+      },
+      "name": "Generate Trend Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 700],
+      "id": "trend-report"
+    }
+  ],
+  "connections": {
+    "GitHub PR Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse PR Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse PR Data": {
+      "main": [
+        [
+          {
+            "node": "Load Learned Patterns",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Learned Patterns": {
+      "main": [
+        [
+          {
+            "node": "Analyzer Agent - Extract Patterns",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyzer Agent - Extract Patterns": {
+      "main": [
+        [
+          {
+            "node": "Review Agent - Apply Rules",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review Agent - Apply Rules": {
+      "main": [
+        [
+          {
+            "node": "Store Review in Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Review in Database": {
+      "main": [
+        [
+          {
+            "node": "Format GitHub Comment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format GitHub Comment": {
+      "main": [
+        [
+          {
+            "node": "Post to GitHub PR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekly Learning Trigger": {
+      "main": [
+        [
+          {
+            "node": "Analyze Review History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Review History": {
+      "main": [
+        [
+          {
+            "node": "Learning Agent - Identify Patterns",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Learning Agent - Identify Patterns": {
+      "main": [
+        [
+          {
+            "node": "Update Patterns",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Patterns": {
+      "main": [
+        [
+          {
+            "node": "Generate Trend Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "staticData": null,
+  "tags": ["code-review", "learning", "github", "medium-high"]
+}

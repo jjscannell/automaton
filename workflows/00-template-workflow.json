@@ -1,0 +1,315 @@
+{
+  "name": "00 - Template Workflow with Error Handling",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "id": "trigger-node"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Initialize workflow state\nconst workflowState = {\n  startTime: new Date().toISOString(),\n  requestId: Date.now().toString(36) + Math.random().toString(36).substr(2),\n  retryCount: 0,\n  maxRetries: 3\n};\n\nreturn [{ json: workflowState }];"
+      },
+      "name": "Initialize State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300],
+      "id": "init-state"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Rate Limiting Logic\nconst RATE_LIMIT = 10; // max requests per minute\nconst WINDOW_MS = 60000; // 1 minute\n\n// In production, this would check external storage (Redis/DB)\n// For demo, we'll just add a delay\nconst now = Date.now();\nconst lastRequest = $workflow.staticData.lastRequest || 0;\nconst timeSinceLastRequest = now - lastRequest;\n\nif (timeSinceLastRequest < (WINDOW_MS / RATE_LIMIT)) {\n  const delayMs = (WINDOW_MS / RATE_LIMIT) - timeSinceLastRequest;\n  return [{ json: { ...($input.item.json), shouldDelay: true, delayMs } }];\n}\n\n$workflow.staticData.lastRequest = now;\nreturn [{ json: { ...($input.item.json), shouldDelay: false, delayMs: 0 } }];"
+      },
+      "name": "Rate Limiter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 300],
+      "id": "rate-limiter"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.shouldDelay }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Should Delay?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [840, 300],
+      "id": "should-delay"
+    },
+    {
+      "parameters": {
+        "amount": "={{ $json.delayMs }}",
+        "unit": "ms"
+      },
+      "name": "Apply Rate Limit",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [1040, 200],
+      "id": "apply-delay"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Your task here\" --session-id {{ $json.requestId }}"
+      },
+      "name": "Execute Claude Command",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1240, 300],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "execute-claude"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.error }}",
+              "operation": "isEmpty"
+            }
+          ]
+        }
+      },
+      "name": "Check for Errors",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1440, 300],
+      "id": "error-check"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log successful execution\nconst result = {\n  status: 'success',\n  requestId: $input.item.json.requestId,\n  output: $input.item.json.output || $input.item.json.stdout,\n  duration: Date.now() - new Date($input.item.json.startTime).getTime(),\n  timestamp: new Date().toISOString()\n};\n\nconsole.log('Workflow Success:', JSON.stringify(result));\nreturn [{ json: result }];"
+      },
+      "name": "Log Success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1640, 200],
+      "id": "log-success"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Error handling with retry logic\nconst errorData = $input.item.json;\nconst retryCount = errorData.retryCount || 0;\nconst maxRetries = errorData.maxRetries || 3;\n\nconst errorInfo = {\n  status: 'error',\n  requestId: errorData.requestId,\n  error: errorData.error || 'Unknown error',\n  retryCount: retryCount,\n  maxRetries: maxRetries,\n  shouldRetry: retryCount < maxRetries,\n  timestamp: new Date().toISOString()\n};\n\nconsole.error('Workflow Error:', JSON.stringify(errorInfo));\nreturn [{ json: errorInfo }];"
+      },
+      "name": "Handle Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1640, 400],
+      "id": "handle-error"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.shouldRetry }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Should Retry?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1840, 400],
+      "id": "should-retry"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Increment retry count and prepare for retry\nconst data = $input.item.json;\ndata.retryCount = (data.retryCount || 0) + 1;\ndata.retryDelay = Math.pow(2, data.retryCount) * 1000; // Exponential backoff\n\nreturn [{ json: data }];"
+      },
+      "name": "Prepare Retry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2040, 300],
+      "id": "prepare-retry"
+    },
+    {
+      "parameters": {
+        "amount": "={{ $json.retryDelay }}",
+        "unit": "ms"
+      },
+      "name": "Exponential Backoff",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [2240, 300],
+      "id": "backoff"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Final failure - send alert\nconst failureData = {\n  status: 'failed',\n  requestId: $input.item.json.requestId,\n  error: $input.item.json.error,\n  retriesExhausted: true,\n  timestamp: new Date().toISOString(),\n  alertMessage: `⚠️ Workflow Failed after ${$input.item.json.retryCount} retries\\nRequest: ${$input.item.json.requestId}\\nError: ${$input.item.json.error}`\n};\n\nconsole.error('FINAL FAILURE:', JSON.stringify(failureData));\nreturn [{ json: failureData }];"
+      },
+      "name": "Final Failure Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2040, 500],
+      "id": "final-failure"
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Initialize State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Initialize State": {
+      "main": [
+        [
+          {
+            "node": "Rate Limiter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limiter": {
+      "main": [
+        [
+          {
+            "node": "Should Delay?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Delay?": {
+      "main": [
+        [
+          {
+            "node": "Apply Rate Limit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execute Claude Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Rate Limit": {
+      "main": [
+        [
+          {
+            "node": "Execute Claude Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Claude Command": {
+      "main": [
+        [
+          {
+            "node": "Check for Errors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check for Errors": {
+      "main": [
+        [
+          {
+            "node": "Log Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Handle Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Handle Error": {
+      "main": [
+        [
+          {
+            "node": "Should Retry?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Retry?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Retry",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Final Failure Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Retry": {
+      "main": [
+        [
+          {
+            "node": "Exponential Backoff",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Exponential Backoff": {
+      "main": [
+        [
+          {
+            "node": "Execute Claude Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": ["template", "error-handling", "rate-limiting"],
+  "meta": {
+    "instanceId": "sample"
+  }
+}

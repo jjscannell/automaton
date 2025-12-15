@@ -1,0 +1,45 @@
+# Environment variables and secrets
+.env
+*.env
+!.env.template
+
+# n8n data
+.n8n/
+database.sqlite
+database.sqlite-*
+
+# Docker volumes
+volumes/
+
+# Logs
+*.log
+logs/
+
+# Node modules
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Backup files
+*.bak
+backup/
+*-backup/
+
+# ngrok
+ngrok.yml
+ngrok.log

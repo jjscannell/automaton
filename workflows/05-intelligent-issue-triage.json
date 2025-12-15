@@ -1,0 +1,405 @@
+{
+  "name": "05 - Intelligent Issue Triage & Auto-Resolution (Medium-High)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "github-issue-webhook",
+        "options": {}
+      },
+      "name": "GitHub Issue Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 400],
+      "webhookId": "github-issue",
+      "id": "webhook-trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Rate limiting - queue if too many requests\nconst RATE_LIMIT = 5; // max 5 issues per minute\nconst WINDOW_MS = 60000;\n\nif (!$workflow.staticData.issueQueue) {\n  $workflow.staticData.issueQueue = [];\n  $workflow.staticData.processedInWindow = 0;\n  $workflow.staticData.windowStart = Date.now();\n}\n\nconst now = Date.now();\nif (now - $workflow.staticData.windowStart > WINDOW_MS) {\n  // Reset window\n  $workflow.staticData.processedInWindow = 0;\n  $workflow.staticData.windowStart = now;\n}\n\nif ($workflow.staticData.processedInWindow >= RATE_LIMIT) {\n  return [{ json: { \n    queued: true,\n    message: 'Rate limit reached, queuing issue',\n    queueSize: $workflow.staticData.issueQueue.length + 1\n  }}];\n}\n\n$workflow.staticData.processedInWindow++;\nreturn [{ json: { \n  queued: false,\n  ...($input.item.json)\n}}];"
+      },
+      "name": "Rate Limiter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 400],
+      "id": "rate-limiter"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.queued }}",
+              "value2": false
+            }
+          ]
+        }
+      },
+      "name": "Process Now?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 400],
+      "id": "process-check"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract issue data from GitHub webhook\nconst issue = $input.item.json.issue || {};\nconst action = $input.item.json.action;\n\n// Only process new issues\nif (action !== 'opened') {\n  return [];\n}\n\nconst issueData = {\n  number: issue.number,\n  title: issue.title || 'Untitled',\n  body: issue.body || '',\n  author: issue.user?.login || 'unknown',\n  labels: (issue.labels || []).map(l => l.name),\n  url: issue.html_url,\n  createdAt: issue.created_at,\n  triageId: `triage-${issue.number}-${Date.now()}`\n};\n\nreturn [{ json: issueData }];"
+      },
+      "name": "Parse Issue Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300],
+      "id": "parse-issue"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Classify this GitHub issue into one of these categories: BUG, FEATURE, QUESTION, DUPLICATE. Respond with ONLY the category name.\\n\\nTitle: {{ $json.title }}\\nBody: {{ $json.body.substring(0, 500) }}\" --session-id {{ $json.triageId }}"
+      },
+      "name": "Triage Agent - Classify",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1050, 300],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "id": "classify"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse classification\nconst output = ($input.item.json.stdout || $input.item.json.output || '').trim().toUpperCase();\nconst validCategories = ['BUG', 'FEATURE', 'QUESTION', 'DUPLICATE'];\n\nlet category = 'UNKNOWN';\nfor (const cat of validCategories) {\n  if (output.includes(cat)) {\n    category = cat;\n    break;\n  }\n}\n\nreturn [{\n  json: {\n    ...$input.item.json,\n    category: category,\n    classificationRaw: output\n  }\n}];"
+      },
+      "name": "Parse Classification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 300],
+      "id": "parse-classification"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.category }}",
+              "operation": "equals",
+              "value2": "BUG"
+            }
+          ]
+        }
+      },
+      "name": "Route by Category",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [1450, 300],
+      "id": "route-category",
+      "parameters": {
+        "mode": "rules",
+        "rules": {
+          "rules": [
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.category }}",
+                    "operation": "equals",
+                    "value2": "BUG"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "BUG"
+            },
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.category }}",
+                    "operation": "equals",
+                    "value2": "FEATURE"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "FEATURE"
+            },
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.category }}",
+                    "operation": "equals",
+                    "value2": "QUESTION"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "QUESTION"
+            },
+            {
+              "conditions": {
+                "string": [
+                  {
+                    "value1": "={{ $json.category }}",
+                    "operation": "equals",
+                    "value2": "DUPLICATE"
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "DUPLICATE"
+            }
+          ]
+        },
+        "fallbackOutput": "extra"
+      }
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Analyze this bug report and determine if it's a simple fix (like typo, documentation, config). Respond YES or NO.\\n\\nTitle: {{ $json.title }}\\nBody: {{ $json.body.substring(0, 500) }}\" --session-id {{ $json.triageId }}"
+      },
+      "name": "Bug Agent - Assess Complexity",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1650, 100],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "bug-assess"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Validate this feature request. Is it feasible and aligned with project goals? Respond APPROVED or NEEDS_DISCUSSION.\\n\\nTitle: {{ $json.title }}\\nBody: {{ $json.body.substring(0, 500) }}\" --session-id {{ $json.triageId }}"
+      },
+      "name": "Feature Agent - Validate",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1650, 250],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "feature-validate"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Answer this question based on project documentation. Keep answer under 300 words.\\n\\nQuestion: {{ $json.title }}\\nDetails: {{ $json.body.substring(0, 500) }}\" --session-id {{ $json.triageId }}"
+      },
+      "name": "Question Agent - Answer",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1650, 400],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "question-answer"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Search for similar issues to this one. If found, provide the issue numbers.\\n\\nTitle: {{ $json.title }}\" --session-id {{ $json.triageId }}"
+      },
+      "name": "Duplicate Agent - Search",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1650, 550],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "duplicate-search"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log triage results\nconst result = {\n  issueNumber: $input.item.json.number,\n  category: $input.item.json.category,\n  agentResponse: $input.item.json.stdout || $input.item.json.output,\n  triageId: $input.item.json.triageId,\n  timestamp: new Date().toISOString(),\n  action: 'triaged'\n};\n\n// Store in workflow history\nif (!$workflow.staticData.triageHistory) {\n  $workflow.staticData.triageHistory = [];\n}\n$workflow.staticData.triageHistory.push(result);\nif ($workflow.staticData.triageHistory.length > 100) {\n  $workflow.staticData.triageHistory = $workflow.staticData.triageHistory.slice(-100);\n}\n\nconsole.log('Issue triaged:', result);\nreturn [{ json: result }];"
+      },
+      "name": "Log Triage Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1850, 300],
+      "id": "log-result"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Issue queued for later processing\nconst queuedData = {\n  status: 'queued',\n  queueSize: $input.item.json.queueSize,\n  message: 'Issue queued due to rate limiting',\n  timestamp: new Date().toISOString()\n};\n\nconsole.log('Issue queued:', queuedData);\nreturn [{ json: queuedData }];"
+      },
+      "name": "Log Queued",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 500],
+      "id": "log-queued"
+    }
+  ],
+  "connections": {
+    "GitHub Issue Webhook": {
+      "main": [
+        [
+          {
+            "node": "Rate Limiter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rate Limiter": {
+      "main": [
+        [
+          {
+            "node": "Process Now?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Now?": {
+      "main": [
+        [
+          {
+            "node": "Parse Issue Data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Queued",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Issue Data": {
+      "main": [
+        [
+          {
+            "node": "Triage Agent - Classify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Triage Agent - Classify": {
+      "main": [
+        [
+          {
+            "node": "Parse Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Classification": {
+      "main": [
+        [
+          {
+            "node": "Route by Category",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Category": {
+      "main": [
+        [
+          {
+            "node": "Bug Agent - Assess Complexity",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Feature Agent - Validate",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Question Agent - Answer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Duplicate Agent - Search",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bug Agent - Assess Complexity": {
+      "main": [
+        [
+          {
+            "node": "Log Triage Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Feature Agent - Validate": {
+      "main": [
+        [
+          {
+            "node": "Log Triage Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Question Agent - Answer": {
+      "main": [
+        [
+          {
+            "node": "Log Triage Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Duplicate Agent - Search": {
+      "main": [
+        [
+          {
+            "node": "Log Triage Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "staticData": null,
+  "tags": ["github", "triage", "automation", "medium-high"]
+}

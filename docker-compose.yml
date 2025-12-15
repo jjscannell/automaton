@@ -1,0 +1,121 @@
+services:
+  # n8n - Workflow orchestration engine
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n-orchestration
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=false  # Disable for local use
+      - N8N_USER_MANAGEMENT_DISABLED=true  # Skip login screen
+      - N8N_ENCRYPTION_KEY=simple-local-key-12345
+      - N8N_HOST=0.0.0.0
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://localhost:5678/
+      - GENERIC_TIMEZONE=UTC
+      - DB_TYPE=sqlite
+      - SSH_USERNAME=${SSH_USERNAME:-automaton}
+      - SSH_PASSWORD=${SSH_PASSWORD:-automaton}
+    volumes:
+      # Persist n8n data (workflows, credentials, etc)
+      - n8n-data:/home/node/.n8n
+      # Mount your local projects for file access
+      - C:/dev:/workspace:rw
+      # Optionally mount specific workflows
+      - ./workflows:/backup/workflows:ro
+    restart: unless-stopped
+    networks:
+      - orchestration-net
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Claude Code runner with SSH access
+  claude-runner:
+    image: ubuntu:22.04
+    container_name: claude-code-runner
+    command: /bin/bash -c "
+      apt update &&
+      apt install -y curl openssh-server sudo git vim nano &&
+      curl -fsSL https://deb.nodesource.com/setup_20.x | bash - &&
+      apt-get install -y nodejs &&
+      npm install -g @anthropic-ai/claude-code &&
+      mkdir -p /var/run/sshd &&
+      useradd -m -s /bin/bash ${SSH_USERNAME:-automaton} &&
+      echo '${SSH_USERNAME:-automaton}:${SSH_PASSWORD:-automaton}' | chpasswd &&
+      usermod -aG sudo ${SSH_USERNAME:-automaton} &&
+      echo '${SSH_USERNAME:-automaton} ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers &&
+      /usr/sbin/sshd -D"
+    ports:
+      - "2222:22"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SSH_USERNAME=${SSH_USERNAME:-automaton}
+      - SSH_PASSWORD=${SSH_PASSWORD:-automaton}
+    volumes:
+      # Persist Claude config and auth
+      - claude-data:/home/${SSH_USERNAME:-automaton}
+      # Mount your local projects with full access
+      - C:/dev:/workspace:rw
+      # Mount Git repos (adjust paths as needed)
+      - C:/Users:/host-users:ro
+    restart: unless-stopped
+    networks:
+      - orchestration-net
+    healthcheck:
+      test: ["CMD", "pgrep", "sshd"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Discord bot
+  discord-bot:
+    image: node:20-alpine
+    container_name: discord-bot
+    working_dir: /app
+    command: sh -c "npm install && node bot.js"
+    environment:
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+      - N8N_WEBHOOK_URL=http://n8n:5678/webhook/discord-claude
+      - BOT_PREFIX=!claude
+    volumes:
+      # Mount your discord bot code
+      - ./discord-bot-docker:/app:rw
+    restart: unless-stopped
+    networks:
+      - orchestration-net
+    depends_on:
+      - n8n
+    healthcheck:
+      test: ["CMD", "pgrep", "node"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ngrok - Optional, only enable if you need external webhooks
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: ngrok-tunnel
+    command: http n8n:5678
+    ports:
+      - "4040:4040"
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    depends_on:
+      - n8n
+    restart: unless-stopped
+    networks:
+      - orchestration-net
+    profiles:
+      - external  # Only starts with: docker-compose --profile external up
+
+volumes:
+  n8n-data:
+  claude-data:
+
+networks:
+  orchestration-net:
+    driver: bridge

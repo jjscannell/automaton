@@ -1,0 +1,576 @@
+{
+  "name": "08 - Multi-Agent Code Development Pipeline (High)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 1
+            }
+          ]
+        }
+      },
+      "name": "Check Backlog (Hourly)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 500],
+      "id": "schedule-trigger"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Read BACKLOG.md and extract the next pending task. Return ONLY the task description, or 'NONE' if no tasks.\" --session-id orchestrator-{{ Date.now() }}"
+      },
+      "name": "Orchestrator - Read Task List",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [450, 500],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "id": "read-backlog"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse task from backlog\nconst output = ($input.item.json.stdout || $input.item.json.output || '').trim();\n\nif (output === 'NONE' || output.length === 0) {\n  return [];\n}\n\n// Create task session\nconst taskId = `task-${Date.now()}`;\nconst task = {\n  taskId: taskId,\n  description: output,\n  status: 'planning',\n  timestamp: new Date().toISOString()\n};\n\n// Store in workflow state\nif (!$workflow.staticData.activeTasks) {\n  $workflow.staticData.activeTasks = [];\n}\n$workflow.staticData.activeTasks.push(task);\n\nreturn [{ json: task }];"
+      },
+      "name": "Parse Task",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 500],
+      "id": "parse-task"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Create an implementation plan for this task:\\n\\n{{ $json.description }}\\n\\nBreak it down into specific steps: files to modify, functions to add, tests to write. Be concrete and actionable.\" --session-id {{ $json.taskId }}-planning"
+      },
+      "name": "Planning Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [850, 500],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "id": "planning-agent"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Store plan and prepare for coding\nconst plan = $input.item.json.stdout || $input.item.json.output || '';\n\nif (!plan || plan.length < 50) {\n  throw new Error('Plan too short or missing');\n}\n\nconst taskData = {\n  taskId: $input.item.json.taskId,\n  description: $input.item.json.description,\n  plan: plan,\n  status: 'coding',\n  planCreatedAt: new Date().toISOString()\n};\n\nreturn [{ json: taskData }];"
+      },
+      "name": "Validate Plan",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 500],
+      "continueOnFail": true,
+      "id": "validate-plan"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.error }}",
+              "operation": "isEmpty"
+            }
+          ]
+        }
+      },
+      "name": "Plan Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1250, 500],
+      "id": "plan-valid"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Implement this task following the plan:\\n\\nTask: {{ $json.description }}\\n\\nPlan:\\n{{ $json.plan }}\\n\\nWrite the code, create/modify files as needed. Commit when done.\" --session-id {{ $json.taskId }}-coding"
+      },
+      "name": "Coding Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1450, 400],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "id": "coding-agent"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Store implementation result\nconst implementation = $input.item.json.stdout || $input.item.json.output || '';\n\nconst taskData = {\n  ...$input.item.json,\n  implementation: implementation,\n  status: 'reviewing',\n  codingCompletedAt: new Date().toISOString()\n};\n\nreturn [{ json: taskData }];"
+      },
+      "name": "Store Implementation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 400],
+      "id": "store-implementation"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Review this code implementation:\\n\\nTask: {{ $json.description }}\\n\\nImplementation:\\n{{ $json.implementation.substring(0, 1000) }}\\n\\nCheck for: bugs, security issues, code quality, missing edge cases. Provide specific feedback.\" --session-id {{ $json.taskId }}-review"
+      },
+      "name": "Review Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1850, 400],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "id": "review-agent"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Analyze review feedback\nconst review = $input.item.json.stdout || $input.item.json.output || '';\nconst hasIssues = review.toLowerCase().includes('issue') || \n                  review.toLowerCase().includes('bug') || \n                  review.toLowerCase().includes('problem');\n\nconst taskData = {\n  ...$input.item.json,\n  review: review,\n  hasReviewIssues: hasIssues,\n  reviewCompletedAt: new Date().toISOString()\n};\n\nreturn [{ json: taskData }];"
+      },
+      "name": "Analyze Review",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2050, 400],
+      "id": "analyze-review"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.hasReviewIssues }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Has Issues?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2250, 400],
+      "id": "has-issues"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare for fix iteration\nconst retryCount = ($input.item.json.retryCount || 0) + 1;\n\nif (retryCount > 2) {\n  throw new Error('Too many review iterations, manual intervention needed');\n}\n\nconst taskData = {\n  ...$input.item.json,\n  retryCount: retryCount,\n  status: 'fixing'\n};\n\nreturn [{ json: taskData }];"
+      },
+      "name": "Prepare Fix Iteration",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2450, 300],
+      "continueOnFail": true,
+      "id": "prepare-fix"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Fix these issues from code review:\\n\\nReview Feedback:\\n{{ $json.review }}\\n\\nOriginal Implementation:\\n{{ $json.implementation.substring(0, 1000) }}\\n\\nFix the issues and update the code.\" --session-id {{ $json.taskId }}-fixing"
+      },
+      "name": "Coding Agent - Fix Issues",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [2650, 300],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "fix-agent"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Run the test suite for this task. Report any failures.\" --session-id {{ $json.taskId }}-testing"
+      },
+      "name": "Testing Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [2450, 500],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "id": "testing-agent"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse test results\nconst testOutput = $input.item.json.stdout || $input.item.json.output || '';\nconst testsPassed = !testOutput.toLowerCase().includes('failed') && \n                    !testOutput.toLowerCase().includes('error');\n\nconst taskData = {\n  ...$input.item.json,\n  testResults: testOutput,\n  testsPassed: testsPassed,\n  status: testsPassed ? 'documenting' : 'test-failed',\n  testingCompletedAt: new Date().toISOString()\n};\n\nreturn [{ json: taskData }];"
+      },
+      "name": "Parse Test Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2650, 500],
+      "id": "parse-tests"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.testsPassed }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Tests Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2850, 500],
+      "id": "tests-passed"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Update documentation for this change:\\n\\nTask: {{ $json.description }}\\n\\nUpdate README, inline docs, or comments as needed.\" --session-id {{ $json.taskId }}-docs"
+      },
+      "name": "Documentation Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [3050, 400],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "docs-agent"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Create a git commit and PR for this task:\\n\\nTask: {{ $json.description }}\\n\\nWrite a good commit message and create the PR.\" --session-id {{ $json.taskId }}-commit"
+      },
+      "name": "Orchestrator - Commit & PR",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [3250, 400],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "commit-pr"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Mark this task as completed in BACKLOG.md:\\n\\n{{ $json.description }}\" --session-id {{ $json.taskId }}-update"
+      },
+      "name": "Orchestrator - Update Backlog",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [3450, 400],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "update-backlog"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Mark task as completed\nconst completedTask = {\n  taskId: $input.item.json.taskId,\n  description: $input.item.json.description,\n  status: 'completed',\n  completedAt: new Date().toISOString(),\n  duration: new Date() - new Date($input.item.json.timestamp),\n  iterations: ($input.item.json.retryCount || 0) + 1\n};\n\n// Update active tasks\nif ($workflow.staticData.activeTasks) {\n  $workflow.staticData.activeTasks = $workflow.staticData.activeTasks\n    .filter(t => t.taskId !== completedTask.taskId);\n}\n\n// Store in completed tasks\nif (!$workflow.staticData.completedTasks) {\n  $workflow.staticData.completedTasks = [];\n}\n$workflow.staticData.completedTasks.push(completedTask);\n\nconsole.log('Task completed:', completedTask);\nreturn [{ json: completedTask }];"
+      },
+      "name": "Mark Task Complete",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3650, 400],
+      "id": "mark-complete"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Send back to coding agent to fix test failures\nconst taskData = {\n  ...$input.item.json,\n  status: 'fixing-tests',\n  failureReason: 'Tests failed'\n};\n\nreturn [{ json: taskData }];"
+      },
+      "name": "Route to Fix Tests",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3050, 600],
+      "id": "route-fix-tests"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log planning failure\nconsole.error('Planning failed for task:', $input.item.json.description);\nreturn [{ json: { \n  status: 'plan-failed',\n  taskId: $input.item.json.taskId,\n  error: $input.item.json.error || 'Plan validation failed'\n}}];"
+      },
+      "name": "Log Planning Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 600],
+      "id": "log-plan-failure"
+    }
+  ],
+  "connections": {
+    "Check Backlog (Hourly)": {
+      "main": [
+        [
+          {
+            "node": "Orchestrator - Read Task List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Orchestrator - Read Task List": {
+      "main": [
+        [
+          {
+            "node": "Parse Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Task": {
+      "main": [
+        [
+          {
+            "node": "Planning Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Planning Agent": {
+      "main": [
+        [
+          {
+            "node": "Validate Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Plan": {
+      "main": [
+        [
+          {
+            "node": "Plan Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Plan Valid?": {
+      "main": [
+        [
+          {
+            "node": "Coding Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Planning Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Coding Agent": {
+      "main": [
+        [
+          {
+            "node": "Store Implementation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Implementation": {
+      "main": [
+        [
+          {
+            "node": "Review Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Review Agent": {
+      "main": [
+        [
+          {
+            "node": "Analyze Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Review": {
+      "main": [
+        [
+          {
+            "node": "Has Issues?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Issues?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Fix Iteration",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Testing Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Fix Iteration": {
+      "main": [
+        [
+          {
+            "node": "Coding Agent - Fix Issues",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Coding Agent - Fix Issues": {
+      "main": [
+        [
+          {
+            "node": "Review Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Testing Agent": {
+      "main": [
+        [
+          {
+            "node": "Parse Test Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Test Results": {
+      "main": [
+        [
+          {
+            "node": "Tests Passed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tests Passed?": {
+      "main": [
+        [
+          {
+            "node": "Documentation Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Route to Fix Tests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route to Fix Tests": {
+      "main": [
+        [
+          {
+            "node": "Coding Agent - Fix Issues",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Documentation Agent": {
+      "main": [
+        [
+          {
+            "node": "Orchestrator - Commit & PR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Orchestrator - Commit & PR": {
+      "main": [
+        [
+          {
+            "node": "Orchestrator - Update Backlog",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Orchestrator - Update Backlog": {
+      "main": [
+        [
+          {
+            "node": "Mark Task Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "staticData": null,
+  "tags": ["multi-agent", "development", "automation", "high", "orchestrator"]
+}

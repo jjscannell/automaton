@@ -1,0 +1,395 @@
+{
+  "name": "07 - Continuous Codebase Health Monitor (High)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "name": "Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 500],
+      "id": "schedule"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Initialize health check session\nconst sessionId = `health-${Date.now()}`;\nconst timestamp = new Date().toISOString();\n\nreturn [\n  { json: { sessionId, timestamp, agent: 'security', agentId: `${sessionId}-security` } },\n  { json: { sessionId, timestamp, agent: 'quality', agentId: `${sessionId}-quality` } },\n  { json: { sessionId, timestamp, agent: 'test', agentId: `${sessionId}-test` } },\n  { json: { sessionId, timestamp, agent: 'performance', agentId: `${sessionId}-performance` } }\n];"
+      },
+      "name": "Orchestrator - Spawn Agents",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 500],
+      "id": "orchestrator"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Run security audit: Check for vulnerable dependencies, exposed secrets, security misconfigurations. Report findings.\" --session-id {{ $json.agentId }}"
+      },
+      "name": "Security Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [650, 300],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "id": "security-agent"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Run code quality audit: Check code complexity, duplication, maintainability index. Report issues.\" --session-id {{ $json.agentId }}"
+      },
+      "name": "Quality Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [650, 450],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "id": "quality-agent"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Run test suite audit: Check coverage metrics, identify flaky tests, measure test execution time.\" --session-id {{ $json.agentId }}"
+      },
+      "name": "Test Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [650, 600],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "id": "test-agent"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Run performance audit: Check bundle size, build time, memory usage, startup time.\" --session-id {{ $json.agentId }}"
+      },
+      "name": "Performance Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [650, 750],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "id": "performance-agent"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Aggregate all agent results\nconst items = $input.all();\nconst sessionId = items[0].json.sessionId;\nconst timestamp = items[0].json.timestamp;\n\nconst results = {\n  sessionId: sessionId,\n  timestamp: timestamp,\n  agents: items.map(item => ({\n    agent: item.json.agent,\n    agentId: item.json.agentId,\n    output: item.json.stdout || item.json.output || '',\n    error: item.json.error || null,\n    success: !item.json.error\n  }))\n};\n\n// Count successes and failures\nresults.successCount = results.agents.filter(a => a.success).length;\nresults.failureCount = results.agents.filter(a => !a.success).length;\nresults.totalAgents = results.agents.length;\n\nreturn [{ json: results }];"
+      },
+      "name": "Aggregator - Combine Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 500],
+      "id": "aggregator",
+      "parameters": {
+        "mode": "mergeByPosition"
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Store metrics in time-series database (static data)\nif (!$workflow.staticData.healthMetrics) {\n  $workflow.staticData.healthMetrics = [];\n}\n\nconst currentMetrics = {\n  timestamp: $input.item.json.timestamp,\n  sessionId: $input.item.json.sessionId,\n  successCount: $input.item.json.successCount,\n  failureCount: $input.item.json.failureCount,\n  results: $input.item.json.agents\n};\n\n$workflow.staticData.healthMetrics.push(currentMetrics);\n\n// Keep only last 30 days (assuming 4 checks per day = 120 entries)\nif ($workflow.staticData.healthMetrics.length > 120) {\n  $workflow.staticData.healthMetrics = $workflow.staticData.healthMetrics.slice(-120);\n}\n\nreturn [{ json: { ...($input.item.json), stored: true } }];"
+      },
+      "name": "Store Metrics in Database",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 500],
+      "id": "store-metrics"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Analyze trends from historical data\nconst history = $workflow.staticData.healthMetrics || [];\n\nif (history.length < 2) {\n  return [{ json: { \n    ...($input.item.json),\n    trends: 'Insufficient data for trend analysis',\n    hasNegativeTrend: false\n  }}];\n}\n\n// Get last 10 checks for trend analysis\nconst recentChecks = history.slice(-10);\nconst currentCheck = $input.item.json;\n\n// Calculate trend indicators\nconst avgSuccessRate = recentChecks.reduce((sum, check) => \n  sum + (check.successCount / 4 * 100), 0) / recentChecks.length;\n\nconst currentSuccessRate = (currentCheck.successCount / 4 * 100);\n\n// Detect if metrics are degrading\nconst hasNegativeTrend = currentSuccessRate < avgSuccessRate - 10;\n\nconst trends = {\n  avgSuccessRate: avgSuccessRate.toFixed(1),\n  currentSuccessRate: currentSuccessRate.toFixed(1),\n  trend: currentSuccessRate > avgSuccessRate ? 'improving' : 'degrading',\n  hasNegativeTrend: hasNegativeTrend,\n  checkCount: history.length\n};\n\nreturn [{ json: { ...($input.item.json), trends } }];"
+      },
+      "name": "Trend Analyzer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 500],
+      "id": "trend-analyzer"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.trends.hasNegativeTrend || $json.failureCount > 0 }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Should Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1450, 500],
+      "id": "should-alert"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format alert message\nconst data = $input.item.json;\nlet alertMessage = '';\n\nif (data.trends.hasNegativeTrend) {\n  alertMessage += `📉 **Negative Trend Detected**\\n`;\n  alertMessage += `Success rate dropped from ${data.trends.avgSuccessRate}% to ${data.trends.currentSuccessRate}%\\n\\n`;\n}\n\nif (data.failureCount > 0) {\n  alertMessage += `⚠️ **Failed Checks: ${data.failureCount}/${data.totalAgents}**\\n\\n`;\n}\n\nalertMessage += `## Agent Results\\n`;\ndata.agents.forEach(agent => {\n  const status = agent.success ? '✅' : '❌';\n  alertMessage += `${status} **${agent.agent.toUpperCase()}**\\n`;\n  if (agent.error) {\n    alertMessage += `   Error: ${agent.error}\\n`;\n  } else {\n    const preview = (agent.output || '').substring(0, 200);\n    alertMessage += `   ${preview}${agent.output.length > 200 ? '...' : ''}\\n`;\n  }\n  alertMessage += `\\n`;\n});\n\nalertMessage += `\\n_Session: ${data.sessionId}_\\n_Time: ${data.timestamp}_`;\n\nreturn [{ json: { ...data, alertMessage } }];"
+      },
+      "name": "Format Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 400],
+      "id": "format-alert"
+    },
+    {
+      "parameters": {
+        "url": "YOUR_SLACK_WEBHOOK_URL",
+        "options": {},
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "={{ $json.alertMessage }}"
+            }
+          ]
+        }
+      },
+      "name": "Send Alert (Slack/Discord)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1850, 400],
+      "id": "send-alert"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Check if any critical issues need auto-fixing\nconst data = $input.item.json;\nconst securityAgent = data.agents.find(a => a.agent === 'security');\n\nif (!securityAgent || !securityAgent.success) {\n  return [];\n}\n\nconst output = securityAgent.output.toLowerCase();\nconst hasSimpleFix = output.includes('outdated') || output.includes('dependency');\n\nif (hasSimpleFix) {\n  return [{ json: { \n    ...data,\n    autoFixType: 'dependency-update',\n    fixDescription: 'Outdated dependencies detected'\n  }}];\n}\n\nreturn [];"
+      },
+      "name": "Check for Auto-Fix",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 200],
+      "id": "check-autofix"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Create a PR to fix this issue: {{ $json.fixDescription }}. Update dependencies safely.\" --session-id {{ $json.sessionId }}-autofix"
+      },
+      "name": "Auto-Fix Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1850, 200],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "autofix-agent"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log healthy status\nconst data = $input.item.json;\nconsole.log('Health check passed:', {\n  sessionId: data.sessionId,\n  successRate: data.trends.currentSuccessRate,\n  trend: data.trends.trend\n});\n\nreturn [{ json: { status: 'healthy', ...data } }];"
+      },
+      "name": "Log Healthy Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 600],
+      "id": "log-healthy"
+    }
+  ],
+  "connections": {
+    "Every 6 Hours": {
+      "main": [
+        [
+          {
+            "node": "Orchestrator - Spawn Agents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Orchestrator - Spawn Agents": {
+      "main": [
+        [
+          {
+            "node": "Security Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Quality Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Test Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Performance Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Security Agent": {
+      "main": [
+        [
+          {
+            "node": "Aggregator - Combine Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Quality Agent": {
+      "main": [
+        [
+          {
+            "node": "Aggregator - Combine Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test Agent": {
+      "main": [
+        [
+          {
+            "node": "Aggregator - Combine Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Performance Agent": {
+      "main": [
+        [
+          {
+            "node": "Aggregator - Combine Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregator - Combine Results": {
+      "main": [
+        [
+          {
+            "node": "Store Metrics in Database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store Metrics in Database": {
+      "main": [
+        [
+          {
+            "node": "Trend Analyzer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trend Analyzer": {
+      "main": [
+        [
+          {
+            "node": "Should Alert?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Alert?": {
+      "main": [
+        [
+          {
+            "node": "Format Alert",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check for Auto-Fix",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Healthy Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Alert": {
+      "main": [
+        [
+          {
+            "node": "Send Alert (Slack/Discord)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check for Auto-Fix": {
+      "main": [
+        [
+          {
+            "node": "Auto-Fix Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "staticData": null,
+  "tags": ["health-monitoring", "automation", "multi-agent", "high"]
+}

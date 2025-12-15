@@ -1,0 +1,136 @@
+{
+  "name": "02 - Claude with Session Management (Simple)",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "When clicking 'Test workflow'",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "id": "manual-trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate UUID for session tracking\nconst uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {\n  const r = Math.random() * 16 | 0;\n  const v = c == 'x' ? r : (r & 0x3 | 0x8);\n  return v.toString(16);\n});\n\nreturn [{ json: { \n  sessionId: uuid,\n  timestamp: new Date().toISOString()\n} }];"
+      },
+      "name": "Generate Session UUID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300],
+      "id": "generate-uuid"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"What's your favorite thing about automation?\" --session-id {{ $json.sessionId }}"
+      },
+      "name": "Claude with Session",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [650, 300],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "id": "claude-session"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.error }}",
+              "operation": "isEmpty"
+            }
+          ]
+        }
+      },
+      "name": "Check Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [850, 300],
+      "id": "check-success"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log successful session response\nconst result = {\n  status: 'success',\n  sessionId: $input.item.json.sessionId,\n  response: $input.item.json.stdout || $input.item.json.output,\n  timestamp: new Date().toISOString()\n};\n\nconsole.log('Session created:', result.sessionId);\nreturn [{ json: result }];"
+      },
+      "name": "Success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 200],
+      "id": "success"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log error with session info\nconst errorResult = {\n  status: 'error',\n  sessionId: $input.item.json.sessionId,\n  error: $input.item.json.error || 'Unknown error occurred',\n  timestamp: new Date().toISOString()\n};\n\nconsole.error('Session failed:', errorResult);\nreturn [{ json: errorResult }];"
+      },
+      "name": "Error Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 400],
+      "id": "error-handler"
+    }
+  ],
+  "connections": {
+    "When clicking 'Test workflow'": {
+      "main": [
+        [
+          {
+            "node": "Generate Session UUID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Session UUID": {
+      "main": [
+        [
+          {
+            "node": "Claude with Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude with Session": {
+      "main": [
+        [
+          {
+            "node": "Check Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Success": {
+      "main": [
+        [
+          {
+            "node": "Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "staticData": null,
+  "tags": ["session-management", "beginner", "tutorial"]
+}

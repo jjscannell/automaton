@@ -1,0 +1,850 @@
+{
+  "name": "10 - Distributed Testing & Deployment Pipeline (Very High)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "git-push-main",
+        "options": {}
+      },
+      "name": "Git Push to Main Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 600],
+      "webhookId": "git-push-main",
+      "id": "webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Initialize deployment pipeline\nconst commit = $input.item.json.head_commit || {};\nconst deploymentId = `deploy-${Date.now()}`;\n\nconst pipeline = {\n  deploymentId: deploymentId,\n  commitHash: commit.id?.substring(0, 7) || 'unknown',\n  commitMessage: commit.message || 'No message',\n  author: commit.author?.name || 'unknown',\n  branch: $input.item.json.ref?.replace('refs/heads/', '') || 'main',\n  timestamp: new Date().toISOString(),\n  phase: 'testing'\n};\n\nconsole.log('Deployment started:', deploymentId);\nreturn [{ json: pipeline }];"
+      },
+      "name": "Orchestrator - Initialize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 600],
+      "id": "init-pipeline"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Spawn parallel test agents\nconst deploymentId = $input.item.json.deploymentId;\nconst timestamp = $input.item.json.timestamp;\n\nreturn [\n  { json: { deploymentId, timestamp, testType: 'unit', agentId: `${deploymentId}-unit` } },\n  { json: { deploymentId, timestamp, testType: 'integration', agentId: `${deploymentId}-integration` } },\n  { json: { deploymentId, timestamp, testType: 'e2e', agentId: `${deploymentId}-e2e` } },\n  { json: { deploymentId, timestamp, testType: 'security', agentId: `${deploymentId}-security` } }\n];"
+      },
+      "name": "Spawn Test Agents",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 600],
+      "id": "spawn-tests"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Run unit tests. Report pass/fail count and execution time.\" --session-id {{ $json.agentId }}"
+      },
+      "name": "Unit Test Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [850, 400],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "id": "unit-tests"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Run integration tests. Report results.\" --session-id {{ $json.agentId }}"
+      },
+      "name": "Integration Test Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [850, 550],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "id": "integration-tests"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Run E2E tests. Report results.\" --session-id {{ $json.agentId }}"
+      },
+      "name": "E2E Test Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [850, 700],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "id": "e2e-tests"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Run security scan: SAST, dependency audit, secrets detection. Report findings.\" --session-id {{ $json.agentId }}"
+      },
+      "name": "Security Scan Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [850, 850],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "id": "security-scan"
+    },
+    {
+      "parameters": {
+        "mode": "mergeByPosition"
+      },
+      "name": "Aggregate Test Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 600],
+      "id": "aggregate-tests",
+      "parameters": {
+        "jsCode": "// Aggregate all test results\nconst items = $input.all();\n\nconst results = items.map(item => {\n  const output = item.json.stdout || item.json.output || '';\n  const passed = !output.toLowerCase().includes('fail') && !item.json.error;\n  \n  return {\n    testType: item.json.testType,\n    passed: passed,\n    output: output,\n    error: item.json.error || null\n  };\n});\n\nconst allPassed = results.every(r => r.passed);\nconst passedCount = results.filter(r => r.passed).length;\n\nreturn [{\n  json: {\n    deploymentId: items[0].json.deploymentId,\n    testResults: results,\n    allTestsPassed: allPassed,\n    passedCount: passedCount,\n    totalTests: results.length,\n    phase: allPassed ? 'deploy-dev' : 'failed'\n  }\n}];"
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.allTestsPassed }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "All Tests Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1250, 600],
+      "id": "tests-check"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Deploy to DEV environment. Report deployment status and URL.\" --session-id {{ $json.deploymentId }}-dev"
+      },
+      "name": "DEV Deploy Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1450, 500],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "dev-deploy"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Store deployment info\nconst deployment = {\n  deploymentId: $input.item.json.deploymentId,\n  environment: 'dev',\n  deployedAt: new Date().toISOString(),\n  output: $input.item.json.stdout || $input.item.json.output\n};\n\nreturn [{ json: { ...($input.item.json), devDeployment: deployment } }];"
+      },
+      "name": "Store DEV Deployment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 500],
+      "id": "store-dev"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Monitor for 10 minutes\nreturn [{ json: { \n  ...$input.item.json,\n  monitoringPhase: 'dev',\n  monitorDuration: 600000\n}}];"
+      },
+      "name": "Start Monitoring",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1850, 500],
+      "id": "start-monitoring"
+    },
+    {
+      "parameters": {
+        "amount": 600000,
+        "unit": "ms"
+      },
+      "name": "Monitor DEV (10 min)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [2050, 500],
+      "id": "wait-dev"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Check DEV environment health: error rate, response time, CPU, memory. Report any issues.\" --session-id {{ $json.deploymentId }}-monitor-dev"
+      },
+      "name": "Monitor Agent (DEV)",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [2250, 500],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "monitor-dev"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Check if DEV is healthy\nconst output = $input.item.json.stdout || $input.item.json.output || '';\nconst healthy = !output.toLowerCase().includes('issue') && \n                !output.toLowerCase().includes('error') && \n                !output.toLowerCase().includes('high');\n\nreturn [{\n  json: {\n    ...$input.item.json,\n    devHealthy: healthy,\n    devMonitoringResult: output,\n    phase: healthy ? 'deploy-staging' : 'rollback'\n  }\n}];"
+      },
+      "name": "Evaluate DEV Health",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2450, 500],
+      "id": "eval-dev"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.devHealthy }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "DEV Healthy?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2650, 500],
+      "id": "dev-healthy"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Deploy to STAGING environment. Report deployment status.\" --session-id {{ $json.deploymentId }}-staging"
+      },
+      "name": "STAGING Deploy Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [2850, 400],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "staging-deploy"
+    },
+    {
+      "parameters": {
+        "amount": 1800000,
+        "unit": "ms"
+      },
+      "name": "Monitor STAGING (30 min)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [3050, 400],
+      "id": "wait-staging"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Check STAGING environment health. Report metrics and any issues.\" --session-id {{ $json.deploymentId }}-monitor-staging"
+      },
+      "name": "Monitor Agent (STAGING)",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [3250, 400],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "monitor-staging"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Check if STAGING is healthy\nconst output = $input.item.json.stdout || $input.item.json.output || '';\nconst healthy = !output.toLowerCase().includes('issue') && \n                !output.toLowerCase().includes('error');\n\nreturn [{\n  json: {\n    ...$input.item.json,\n    stagingHealthy: healthy,\n    stagingMonitoringResult: output,\n    phase: healthy ? 'schedule-prod' : 'rollback'\n  }\n}];"
+      },
+      "name": "Evaluate STAGING Health",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3450, 400],
+      "id": "eval-staging"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.stagingHealthy }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "STAGING Healthy?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [3650, 400],
+      "id": "staging-healthy"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Schedule PROD deployment (next maintenance window)\nconst now = new Date();\nconst hour = now.getUTCHours();\n\n// Maintenance window: 2-4 AM UTC\nlet deployTime;\nif (hour < 2) {\n  deployTime = new Date(now.setUTCHours(2, 0, 0, 0));\n} else if (hour >= 4) {\n  deployTime = new Date(now.setUTCDate(now.getUTCDate() + 1));\n  deployTime.setUTCHours(2, 0, 0, 0);\n} else {\n  deployTime = now; // We're in the window\n}\n\nconst waitMs = deployTime - new Date();\n\nreturn [{\n  json: {\n    ...$input.item.json,\n    prodScheduledFor: deployTime.toISOString(),\n    waitForProd: waitMs,\n    phase: 'waiting-for-window'\n  }\n}];"
+      },
+      "name": "Schedule PROD Deployment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3850, 300],
+      "id": "schedule-prod"
+    },
+    {
+      "parameters": {
+        "amount": "={{ $json.waitForProd }}",
+        "unit": "ms"
+      },
+      "name": "Wait for Maintenance Window",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [4050, 300],
+      "id": "wait-window"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Deploy to PRODUCTION with gradual rollout: 10% traffic first. Report status.\" --session-id {{ $json.deploymentId }}-prod-10"
+      },
+      "name": "PROD Deploy Agent (10%)",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [4250, 300],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "prod-10"
+    },
+    {
+      "parameters": {
+        "amount": 600000,
+        "unit": "ms"
+      },
+      "name": "Monitor 10% (10 min)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [4450, 300],
+      "id": "wait-10pct"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Check error rates for 10% rollout. Report any issues.\" --session-id {{ $json.deploymentId }}-monitor-10"
+      },
+      "name": "Monitor Agent (10%)",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [4650, 300],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "monitor-10"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Check if 10% rollout is healthy\nconst output = $input.item.json.stdout || $input.item.json.output || '';\nconst healthy = !output.toLowerCase().includes('issue');\n\nif (!healthy) {\n  return [{ json: { ...$input.item.json, phase: 'rollback', rollbackReason: '10% rollout failed' } }];\n}\n\nreturn [{ json: { ...$input.item.json, phase: 'prod-100' } }];"
+      },
+      "name": "Evaluate 10% Rollout",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [4850, 300],
+      "id": "eval-10"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.phase }}",
+              "operation": "equals",
+              "value2": "prod-100"
+            }
+          ]
+        }
+      },
+      "name": "10% Healthy?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [5050, 300],
+      "id": "check-10"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Increase PROD traffic to 100%. Report final deployment status.\" --session-id {{ $json.deploymentId }}-prod-100"
+      },
+      "name": "PROD Deploy Agent (100%)",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [5250, 200],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "prod-100"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Deployment completed successfully\nconst result = {\n  deploymentId: $input.item.json.deploymentId,\n  status: 'completed',\n  completedAt: new Date().toISOString(),\n  environments: ['dev', 'staging', 'production'],\n  prodTraffic: '100%'\n};\n\nif (!$workflow.staticData.deploymentHistory) {\n  $workflow.staticData.deploymentHistory = [];\n}\n$workflow.staticData.deploymentHistory.push(result);\n\nconsole.log('Deployment completed:', result.deploymentId);\nreturn [{ json: result }];"
+      },
+      "name": "Mark Deployment Complete",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [5450, 200],
+      "id": "complete"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Rollback deployment {{ $json.deploymentId }}. Reason: {{ $json.rollbackReason || $json.phase }}\" --session-id {{ $json.deploymentId }}-rollback"
+      },
+      "name": "Auto-Rollback Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [5250, 400],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "rollback"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Alert about rollback\nconst alert = {\n  status: 'rolled-back',\n  deploymentId: $input.item.json.deploymentId,\n  reason: $input.item.json.rollbackReason || 'Health check failed',\n  phase: $input.item.json.phase,\n  alertMessage: `🔴 **Deployment Rollback**\\n\\nDeployment ID: ${$input.item.json.deploymentId}\\nReason: ${$input.item.json.rollbackReason || 'Health check failed'}\\nPhase: ${$input.item.json.phase}\\n\\nAutomatic rollback completed.`\n};\n\nconsole.error('Deployment rolled back:', alert);\nreturn [{ json: alert }];"
+      },
+      "name": "Alert Rollback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [5450, 400],
+      "id": "alert-rollback"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Tests failed - deployment aborted\nconst failed = {\n  status: 'failed',\n  deploymentId: $input.item.json.deploymentId,\n  reason: 'Tests failed',\n  failedTests: $input.item.json.testResults.filter(t => !t.passed),\n  alertMessage: `❌ **Deployment Failed**\\n\\nDeployment ID: ${$input.item.json.deploymentId}\\nReason: Tests failed\\n\\nFailed: ${$input.item.json.totalTests - $input.item.json.passedCount}/${$input.item.json.totalTests} test suites`\n};\n\nconsole.error('Deployment failed:', failed);\nreturn [{ json: failed }];"
+      },
+      "name": "Alert Test Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 700],
+      "id": "alert-test-fail"
+    }
+  ],
+  "connections": {
+    "Git Push to Main Webhook": {
+      "main": [
+        [
+          {
+            "node": "Orchestrator - Initialize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Orchestrator - Initialize": {
+      "main": [
+        [
+          {
+            "node": "Spawn Test Agents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Spawn Test Agents": {
+      "main": [
+        [
+          {
+            "node": "Unit Test Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Integration Test Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "E2E Test Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Security Scan Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unit Test Agent": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Test Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Integration Test Agent": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Test Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "E2E Test Agent": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Test Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Security Scan Agent": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Test Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Test Results": {
+      "main": [
+        [
+          {
+            "node": "All Tests Passed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "All Tests Passed?": {
+      "main": [
+        [
+          {
+            "node": "DEV Deploy Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Alert Test Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DEV Deploy Agent": {
+      "main": [
+        [
+          {
+            "node": "Store DEV Deployment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Store DEV Deployment": {
+      "main": [
+        [
+          {
+            "node": "Start Monitoring",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start Monitoring": {
+      "main": [
+        [
+          {
+            "node": "Monitor DEV (10 min)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Monitor DEV (10 min)": {
+      "main": [
+        [
+          {
+            "node": "Monitor Agent (DEV)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Monitor Agent (DEV)": {
+      "main": [
+        [
+          {
+            "node": "Evaluate DEV Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate DEV Health": {
+      "main": [
+        [
+          {
+            "node": "DEV Healthy?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DEV Healthy?": {
+      "main": [
+        [
+          {
+            "node": "STAGING Deploy Agent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Auto-Rollback Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "STAGING Deploy Agent": {
+      "main": [
+        [
+          {
+            "node": "Monitor STAGING (30 min)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Monitor STAGING (30 min)": {
+      "main": [
+        [
+          {
+            "node": "Monitor Agent (STAGING)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Monitor Agent (STAGING)": {
+      "main": [
+        [
+          {
+            "node": "Evaluate STAGING Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate STAGING Health": {
+      "main": [
+        [
+          {
+            "node": "STAGING Healthy?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "STAGING Healthy?": {
+      "main": [
+        [
+          {
+            "node": "Schedule PROD Deployment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Auto-Rollback Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule PROD Deployment": {
+      "main": [
+        [
+          {
+            "node": "Wait for Maintenance Window",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Maintenance Window": {
+      "main": [
+        [
+          {
+            "node": "PROD Deploy Agent (10%)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PROD Deploy Agent (10%)": {
+      "main": [
+        [
+          {
+            "node": "Monitor 10% (10 min)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Monitor 10% (10 min)": {
+      "main": [
+        [
+          {
+            "node": "Monitor Agent (10%)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Monitor Agent (10%)": {
+      "main": [
+        [
+          {
+            "node": "Evaluate 10% Rollout",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate 10% Rollout": {
+      "main": [
+        [
+          {
+            "node": "10% Healthy?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10% Healthy?": {
+      "main": [
+        [
+          {
+            "node": "PROD Deploy Agent (100%)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Auto-Rollback Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "PROD Deploy Agent (100%)": {
+      "main": [
+        [
+          {
+            "node": "Mark Deployment Complete",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto-Rollback Agent": {
+      "main": [
+        [
+          {
+            "node": "Alert Rollback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "staticData": null,
+  "tags": ["deployment", "testing", "ci-cd", "very-high", "production"]
+}

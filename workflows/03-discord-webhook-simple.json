@@ -1,0 +1,238 @@
+{
+  "name": "03 - Discord to Claude Interactive Bot (Medium)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "discord-claude",
+        "options": {}
+      },
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "webhookId": "discord-claude",
+      "id": "webhook-trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract and validate message from Discord webhook\nconst content = $input.item.json.content || $input.item.json.message || '';\nconst username = $input.item.json.username || 'Unknown';\n\n// Basic validation\nif (!content || content.trim().length === 0) {\n  throw new Error('No message content received');\n}\n\nif (content.length > 2000) {\n  throw new Error('Message too long (max 2000 characters)');\n}\n\nreturn [{\n  json: {\n    message: content.trim(),\n    user: username,\n    timestamp: new Date().toISOString(),\n    messageLength: content.trim().length\n  }\n}];"
+      },
+      "name": "Parse & Validate Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300],
+      "continueOnFail": true,
+      "id": "parse-message"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.error }}",
+              "operation": "isEmpty"
+            }
+          ]
+        }
+      },
+      "name": "Validation Check",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 300],
+      "id": "validation-check"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate session ID for context\nconst uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {\n  const r = Math.random() * 16 | 0;\n  const v = c == 'x' ? r : (r & 0x3 | 0x8);\n  return v.toString(16);\n});\n\nreturn [{\n  json: {\n    sessionId: uuid,\n    message: $input.item.json.message,\n    user: $input.item.json.user,\n    timestamp: $input.item.json.timestamp\n  }\n}];"
+      },
+      "name": "Generate Session ID",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 200],
+      "id": "generate-session"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"{{ $json.message }}\" --session-id {{ $json.sessionId }}"
+      },
+      "name": "Ask Claude",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1050, 200],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "id": "ask-claude"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.error }}",
+              "operation": "isEmpty"
+            }
+          ]
+        }
+      },
+      "name": "Claude Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1250, 200],
+      "id": "claude-success"
+    },
+    {
+      "parameters": {
+        "url": "YOUR_DISCORD_WEBHOOK_URL_HERE",
+        "options": {},
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "=**Claude Response:**\\n```\\n{{ $json.stdout || $json.output }}\\n```\\n\\n_Session: {{ $json.sessionId }} | User: {{ $json.user }}_"
+            }
+          ]
+        }
+      },
+      "name": "Send Success to Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1450, 100],
+      "id": "send-success"
+    },
+    {
+      "parameters": {
+        "url": "YOUR_DISCORD_WEBHOOK_URL_HERE",
+        "options": {},
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "=⚠️ **Error:** {{ $json.error || 'Claude request failed' }}\\n_Session: {{ $json.sessionId }}_"
+            }
+          ]
+        }
+      },
+      "name": "Send Error to Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1450, 300],
+      "id": "send-error"
+    },
+    {
+      "parameters": {
+        "url": "YOUR_DISCORD_WEBHOOK_URL_HERE",
+        "options": {},
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "=⚠️ **Validation Error:** {{ $json.error || 'Invalid message format' }}"
+            }
+          ]
+        }
+      },
+      "name": "Send Validation Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [850, 400],
+      "id": "send-validation-error"
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse & Validate Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Validate Message": {
+      "main": [
+        [
+          {
+            "node": "Validation Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validation Check": {
+      "main": [
+        [
+          {
+            "node": "Generate Session ID",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Validation Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Session ID": {
+      "main": [
+        [
+          {
+            "node": "Ask Claude",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Claude": {
+      "main": [
+        [
+          {
+            "node": "Claude Success?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Success?": {
+      "main": [
+        [
+          {
+            "node": "Send Success to Discord",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Error to Discord",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "staticData": null,
+  "tags": ["discord", "webhook", "interactive", "medium"]
+}

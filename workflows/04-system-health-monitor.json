@@ -1,0 +1,252 @@
+{
+  "name": "04 - System Health Monitor with Alerts (Medium)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "id": "schedule-trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Initialize check state\nconst checkState = {\n  checkId: Date.now().toString(36) + Math.random().toString(36).substr(2),\n  startTime: new Date().toISOString(),\n  checkType: 'system-health'\n};\n\nreturn [{ json: checkState }];"
+      },
+      "name": "Initialize Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 300],
+      "id": "init-check"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Check system health: CPU usage, memory, disk space, running critical services. Report any issues concisely. Keep response under 500 characters.\" --session-id {{ $json.checkId }}"
+      },
+      "name": "Check System Health",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [650, 300],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000,
+      "id": "health-check"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.error }}",
+              "operation": "isEmpty"
+            }
+          ]
+        }
+      },
+      "name": "Check Succeeded?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [850, 300],
+      "id": "check-succeeded"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse health check output for issues\nconst output = $input.item.json.stdout || $input.item.json.output || '';\nconst checkId = $input.item.json.checkId;\n\n// Keywords that indicate problems\nconst issueKeywords = ['issue', 'error', 'critical', 'warning', 'high', 'failed', 'down', 'unavailable'];\nconst hasIssues = issueKeywords.some(keyword => output.toLowerCase().includes(keyword));\n\n// Store in static data for trend analysis\nif (!$workflow.staticData.healthHistory) {\n  $workflow.staticData.healthHistory = [];\n}\n\nconst healthRecord = {\n  timestamp: new Date().toISOString(),\n  hasIssues: hasIssues,\n  output: output,\n  checkId: checkId\n};\n\n$workflow.staticData.healthHistory.push(healthRecord);\n\n// Keep only last 20 checks\nif ($workflow.staticData.healthHistory.length > 20) {\n  $workflow.staticData.healthHistory = $workflow.staticData.healthHistory.slice(-20);\n}\n\n// Count consecutive failures\nconst recentChecks = $workflow.staticData.healthHistory.slice(-3);\nconst consecutiveIssues = recentChecks.every(check => check.hasIssues);\n\nreturn [{\n  json: {\n    ...healthRecord,\n    shouldAlert: hasIssues,\n    criticalAlert: consecutiveIssues,\n    recentFailureCount: recentChecks.filter(c => c.hasIssues).length\n  }\n}];"
+      },
+      "name": "Analyze Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 200],
+      "id": "analyze-results"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.shouldAlert }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Should Alert?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1250, 200],
+      "id": "should-alert"
+    },
+    {
+      "parameters": {
+        "url": "YOUR_DISCORD_WEBHOOK_URL",
+        "options": {},
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "={{ $json.criticalAlert ? '🚨 **CRITICAL SYSTEM ALERT**' : '⚠️ **System Health Warning**' }}\\n\\n```\\n{{ $json.output }}\\n```\\n\\n_Check ID: {{ $json.checkId }}_\\n_Consecutive Issues: {{ $json.recentFailureCount }}/3_\\n_Time: {{ $json.timestamp }}_"
+            }
+          ]
+        }
+      },
+      "name": "Send Discord Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1450, 100],
+      "id": "send-alert"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log healthy status\nconst result = {\n  status: 'healthy',\n  checkId: $input.item.json.checkId,\n  timestamp: $input.item.json.timestamp,\n  output: $input.item.json.output\n};\n\nconsole.log('System healthy:', result.checkId);\nreturn [{ json: result }];"
+      },
+      "name": "Log Healthy Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1450, 300],
+      "id": "log-healthy"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Health check failed to run\nconst errorData = {\n  status: 'check-failed',\n  error: $input.item.json.error || 'Health check command failed',\n  checkId: $input.item.json.checkId,\n  timestamp: new Date().toISOString()\n};\n\nconsole.error('Health check failed:', errorData);\nreturn [{ json: errorData }];"
+      },
+      "name": "Log Check Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 400],
+      "id": "log-failure"
+    },
+    {
+      "parameters": {
+        "url": "YOUR_DISCORD_WEBHOOK_URL",
+        "options": {},
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "content",
+              "value": "=🔴 **Health Check Failed**\\n\\n```\\nError: {{ $json.error }}\\n```\\n\\n_Check ID: {{ $json.checkId }}_\\n_Time: {{ $json.timestamp }}_"
+            }
+          ]
+        }
+      },
+      "name": "Alert Check Failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1250, 500],
+      "id": "alert-failure"
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Initialize Check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Initialize Check": {
+      "main": [
+        [
+          {
+            "node": "Check System Health",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check System Health": {
+      "main": [
+        [
+          {
+            "node": "Check Succeeded?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Succeeded?": {
+      "main": [
+        [
+          {
+            "node": "Analyze Results",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Check Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Results": {
+      "main": [
+        [
+          {
+            "node": "Should Alert?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Alert?": {
+      "main": [
+        [
+          {
+            "node": "Send Discord Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Healthy Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Check Failure": {
+      "main": [
+        [
+          {
+            "node": "Alert Check Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "staticData": null,
+  "tags": ["monitoring", "automation", "health-check", "medium"]
+}

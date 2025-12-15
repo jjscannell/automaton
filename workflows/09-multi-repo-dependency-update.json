@@ -1,0 +1,548 @@
+{
+  "name": "09 - Multi-Repository Dependency Update Orchestrator (Very High)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "cronExpression": "0 2 * * *"
+            }
+          ]
+        }
+      },
+      "name": "Daily at 2am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [250, 600],
+      "id": "schedule"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Initialize dependency update session\nconst sessionId = `dep-update-${Date.now()}`;\nconst timestamp = new Date().toISOString();\n\n// Define repositories (in production, would fetch from config)\nconst repositories = [\n  { name: 'frontend', path: '/repos/frontend', priority: 2 },\n  { name: 'backend-api', path: '/repos/backend-api', priority: 1 },\n  { name: 'shared-lib', path: '/repos/shared-lib', priority: 0 },\n  { name: 'admin-dashboard', path: '/repos/admin-dashboard', priority: 3 },\n  { name: 'mobile-app', path: '/repos/mobile-app', priority: 3 }\n];\n\nreturn [{ json: {\n  sessionId,\n  timestamp,\n  repositories,\n  totalRepos: repositories.length,\n  status: 'scanning'\n}}];"
+      },
+      "name": "Initialize Update Session",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [450, 600],
+      "id": "init-session"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Split into individual repo tasks\nconst repos = $input.item.json.repositories;\nconst sessionId = $input.item.json.sessionId;\n\nreturn repos.map(repo => ({\n  json: {\n    sessionId,\n    repoName: repo.name,\n    repoPath: repo.path,\n    priority: repo.priority,\n    scanId: `${sessionId}-${repo.name}`\n  }\n}));"
+      },
+      "name": "Split by Repository",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [650, 600],
+      "id": "split-repos"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Scan repository {{ $json.repoName }} for outdated dependencies. List package name, current version, latest version, and type (major/minor/patch).\" --session-id {{ $json.scanId }}"
+      },
+      "name": "Scanner Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [850, 600],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "id": "scanner"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse scan results\nconst output = $input.item.json.stdout || $input.item.json.output || '';\nconst hasUpdates = output.toLowerCase().includes('outdated') || \n                   output.toLowerCase().includes('available');\n\nreturn [{\n  json: {\n    ...$input.item.json,\n    scanResults: output,\n    hasUpdates: hasUpdates,\n    scannedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "name": "Parse Scan Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 600],
+      "id": "parse-scan"
+    },
+    {
+      "parameters": {
+        "mode": "mergeByPosition"
+      },
+      "name": "Aggregate Scans",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 600],
+      "id": "aggregate-scans",
+      "parameters": {
+        "jsCode": "// Aggregate all scan results\nconst items = $input.all();\n\nconst reposNeedingUpdate = items.filter(item => item.json.hasUpdates);\n\nreturn [{\n  json: {\n    sessionId: items[0].json.sessionId,\n    totalScanned: items.length,\n    reposNeedingUpdate: reposNeedingUpdate.length,\n    repositories: items.map(item => ({\n      name: item.json.repoName,\n      priority: item.json.priority,\n      hasUpdates: item.json.hasUpdates,\n      scanResults: item.json.scanResults\n    }))\n  }\n}];"
+      }
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Build dependency graph for these repositories and determine update order (dependencies first):\\n\\n{{ JSON.stringify($json.repositories) }}\\n\\nReturn ordered list of repo names.\" --session-id {{ $json.sessionId }}-graph"
+      },
+      "name": "Dependency Graph Builder",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [1450, 600],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "graph-builder"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse update order and prepare strategy\nconst orderOutput = $input.item.json.stdout || $input.item.json.output || '';\nconst repos = $input.item.json.repositories;\n\n// In production, would parse the actual order from output\n// For now, sort by priority (0 = highest)\nconst sortedRepos = repos\n  .filter(r => r.hasUpdates)\n  .sort((a, b) => a.priority - b.priority);\n\nconst strategy = {\n  sessionId: $input.item.json.sessionId,\n  updateOrder: sortedRepos.map(r => r.name),\n  totalToUpdate: sortedRepos.length,\n  strategy: 'sequential', // Could be 'parallel' for independent repos\n  batchSize: 1, // Update one at a time for safety\n  currentIndex: 0\n};\n\nreturn [{ json: { ...strategy, repositories: sortedRepos } }];"
+      },
+      "name": "Strategy Agent - Plan Order",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 600],
+      "id": "strategy"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.totalToUpdate }}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "name": "Any Updates Needed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1850, 600],
+      "id": "any-updates"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get next repository to update\nconst currentIndex = $input.item.json.currentIndex || 0;\nconst repos = $input.item.json.repositories;\n\nif (currentIndex >= repos.length) {\n  return [];\n}\n\nconst currentRepo = repos[currentIndex];\n\nreturn [{\n  json: {\n    sessionId: $input.item.json.sessionId,\n    repoName: currentRepo.name,\n    scanResults: currentRepo.scanResults,\n    currentIndex: currentIndex,\n    totalRepos: repos.length,\n    updateId: `${$input.item.json.sessionId}-update-${currentIndex}`\n  }\n}];"
+      },
+      "name": "Get Next Repository",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2050, 500],
+      "id": "get-next-repo"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Update dependencies for {{ $json.repoName }}:\\n\\nOutdated packages:\\n{{ $json.scanResults }}\\n\\nUpdate package files (package.json, requirements.txt, etc.). Use conservative versions for major updates.\" --session-id {{ $json.updateId }}"
+      },
+      "name": "Update Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [2250, 500],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "id": "update-agent"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Run full test suite for {{ $json.repoName }}. Report pass/fail and any errors.\" --session-id {{ $json.updateId }}-test"
+      },
+      "name": "Test Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [2450, 500],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 2,
+      "id": "test-agent"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Check if tests passed\nconst testOutput = $input.item.json.stdout || $input.item.json.output || '';\nconst testsPassed = !testOutput.toLowerCase().includes('fail') && \n                    !testOutput.toLowerCase().includes('error');\n\nreturn [{\n  json: {\n    ...$input.item.json,\n    testOutput: testOutput,\n    testsPassed: testsPassed,\n    testedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "name": "Evaluate Tests",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2650, 500],
+      "id": "evaluate-tests"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.testsPassed }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "name": "Tests Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [2850, 500],
+      "id": "tests-passed"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Create PR for dependency updates in {{ $json.repoName }}. Include changelog of updated packages.\" --session-id {{ $json.updateId }}-pr"
+      },
+      "name": "Commit Agent - Create PR",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [3050, 400],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "commit-agent"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Store successful update\nconst result = {\n  sessionId: $input.item.json.sessionId,\n  repoName: $input.item.json.repoName,\n  status: 'pr-created',\n  timestamp: new Date().toISOString()\n};\n\n// Track in workflow state\nif (!$workflow.staticData.updateHistory) {\n  $workflow.staticData.updateHistory = [];\n}\n$workflow.staticData.updateHistory.push(result);\n\nconsole.log('PR created for', result.repoName);\nreturn [{ json: result }];"
+      },
+      "name": "Log Success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3250, 400],
+      "id": "log-success"
+    },
+    {
+      "parameters": {
+        "command": "=claude -p \"Rollback dependency updates for {{ $json.repoName }}. Tests failed.\" --session-id {{ $json.updateId }}-rollback"
+      },
+      "name": "Rollback Agent",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [3050, 600],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "id": "rollback-agent"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Send alert about failed update\nconst alert = {\n  status: 'update-failed',\n  repoName: $input.item.json.repoName,\n  reason: 'Tests failed after dependency update',\n  testOutput: $input.item.json.testOutput,\n  alertMessage: `⚠️ Dependency update failed for **${$input.item.json.repoName}**\\n\\nTests failed after update. Changes rolled back.\\n\\nRequires manual investigation.`\n};\n\nconsole.error('Update failed:', alert);\nreturn [{ json: alert }];"
+      },
+      "name": "Alert & Log Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3250, 600],
+      "id": "alert-failure"
+    },
+    {
+      "parameters": {
+        "url": "YOUR_SLACK_WEBHOOK_URL",
+        "options": {},
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "text",
+              "value": "={{ $json.alertMessage }}"
+            }
+          ]
+        }
+      },
+      "name": "Send Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [3450, 600],
+      "id": "send-alert"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Wait 10 minutes before next update (blast radius control)\nreturn [{ json: { \n  message: 'Waiting 10 minutes before next update',\n  timestamp: new Date().toISOString()\n}}];"
+      },
+      "name": "Monitoring Agent - Wait",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [3450, 400],
+      "id": "monitoring-wait"
+    },
+    {
+      "parameters": {
+        "amount": 600000,
+        "unit": "ms"
+      },
+      "name": "Wait 10 Minutes",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [3650, 400],
+      "id": "wait-10min"
+    },
+    {
+      "parameters": {
+        "jsCode": "// No updates needed\nconsole.log('All dependencies up to date');\nreturn [{ json: { \n  status: 'no-updates',\n  message: 'All repositories have current dependencies'\n}}];"
+      },
+      "name": "Log No Updates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2050, 700],
+      "id": "log-no-updates"
+    }
+  ],
+  "connections": {
+    "Daily at 2am": {
+      "main": [
+        [
+          {
+            "node": "Initialize Update Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Initialize Update Session": {
+      "main": [
+        [
+          {
+            "node": "Split by Repository",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split by Repository": {
+      "main": [
+        [
+          {
+            "node": "Scanner Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scanner Agent": {
+      "main": [
+        [
+          {
+            "node": "Parse Scan Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Scan Results": {
+      "main": [
+        [
+          {
+            "node": "Aggregate Scans",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Aggregate Scans": {
+      "main": [
+        [
+          {
+            "node": "Dependency Graph Builder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dependency Graph Builder": {
+      "main": [
+        [
+          {
+            "node": "Strategy Agent - Plan Order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Strategy Agent - Plan Order": {
+      "main": [
+        [
+          {
+            "node": "Any Updates Needed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Any Updates Needed?": {
+      "main": [
+        [
+          {
+            "node": "Get Next Repository",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log No Updates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Next Repository": {
+      "main": [
+        [
+          {
+            "node": "Update Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Agent": {
+      "main": [
+        [
+          {
+            "node": "Test Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Test Agent": {
+      "main": [
+        [
+          {
+            "node": "Evaluate Tests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Tests": {
+      "main": [
+        [
+          {
+            "node": "Tests Passed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tests Passed?": {
+      "main": [
+        [
+          {
+            "node": "Commit Agent - Create PR",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Rollback Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Commit Agent - Create PR": {
+      "main": [
+        [
+          {
+            "node": "Log Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Success": {
+      "main": [
+        [
+          {
+            "node": "Monitoring Agent - Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Monitoring Agent - Wait": {
+      "main": [
+        [
+          {
+            "node": "Wait 10 Minutes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait 10 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Get Next Repository",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rollback Agent": {
+      "main": [
+        [
+          {
+            "node": "Alert & Log Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Alert & Log Failure": {
+      "main": [
+        [
+          {
+            "node": "Send Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "staticData": null,
+  "tags": ["multi-repo", "dependencies", "automation", "very-high", "advanced"]
+}

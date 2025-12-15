@@ -1,0 +1,115 @@
+{
+  "name": "01 - Basic Claude Test (Simple)",
+  "nodes": [
+    {
+      "parameters": {},
+      "name": "When clicking 'Test workflow'",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [250, 300],
+      "id": "manual-trigger"
+    },
+    {
+      "parameters": {
+        "command": "claude -p \"Tell me a short joke about automation\""
+      },
+      "name": "Execute Claude Command",
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [450, 300],
+      "credentials": {
+        "sshPassword": {
+          "id": "1",
+          "name": "SSH account"
+        }
+      },
+      "continueOnFail": true,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "id": "execute-command"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.error }}",
+              "operation": "isEmpty"
+            }
+          ]
+        }
+      },
+      "name": "Check Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [650, 300],
+      "id": "check-success"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log successful response\nconst result = {\n  status: 'success',\n  response: $input.item.json.stdout || $input.item.json.output,\n  timestamp: new Date().toISOString()\n};\n\nconsole.log('Claude response:', result.response);\nreturn [{ json: result }];"
+      },
+      "name": "Success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 200],
+      "id": "success"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Log error\nconst errorResult = {\n  status: 'error',\n  error: $input.item.json.error || 'Unknown error occurred',\n  timestamp: new Date().toISOString()\n};\n\nconsole.error('Workflow failed:', errorResult.error);\nreturn [{ json: errorResult }];"
+      },
+      "name": "Error Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 400],
+      "id": "error-handler"
+    }
+  ],
+  "connections": {
+    "When clicking 'Test workflow'": {
+      "main": [
+        [
+          {
+            "node": "Execute Claude Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Claude Command": {
+      "main": [
+        [
+          {
+            "node": "Check Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Success": {
+      "main": [
+        [
+          {
+            "node": "Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {},
+  "staticData": null,
+  "tags": ["basic", "beginner", "tutorial"]
+}
